@@ -1,0 +1,29 @@
+Package: causality
+Title: Tools for Performing Causal Inference with Observational Data
+Description: Randomized control trials (RCTs) are often viewed as the "golden standard" for causal inference. However, in situations when conducting an RCT is infeasible or unethical, statisticians, economists, and other researchers must rely on observational data for their analysis of causal effects. In the absence of a randomzied experiment, inference can become problematic, and more advanced statistical techniques are required to tease out causality from correlation. This package implements leading analysis methods for inferring causality from observational data, including methods for assessing of covariate balance, estimating propensity scores, and computing average treatment effects and heterogeneous treatment effects.
+Version: 0.1
+Authors@R: c(person("Fronsdal", "Toren", role=c("aut", "cre"),
+	   	   email = "toren@stanford.edu"),
+	     person("Collison", "Jack", role="aut",
+	   	   email = "jack10@stanford.edu"),
+	     person("Chakraborty", "Shuvam", role="aut",
+	   	   email = "shuvamc@stanford.edu"))
+Depends:
+    R (>= 3.1.2)
+Imports:
+    glmnet,
+    grf,
+    ggplot2,
+    sandwich
+License: GPL (>= 2)
+LazyData: true
+RoxygenNote: 7.0.2
+VignetteBuilder: knitr
+Suggests: knitr, rmarkdown
+Encoding: UTF-8
+Collate: 
+    'lalonde.R'
+    'propensity.R'
+    'ate.R'
+    'att.R'
+    'hte.R'
