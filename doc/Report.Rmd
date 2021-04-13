@@ -1,0 +1,460 @@
+---
+title: "A Guide to the causality Package"
+author: "Jack Collison, Toren Fronsdal, and Shuvam Chakraborty"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Report}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+library(causality)
+```
+
+## Tools for Performing Causal Inference with Observational Data
+
+Randomized control trials (RCTs) are often viewed as the "golden standard" for causal inference. However, in situations when conducting an RCT is infeasible or unethical, statisticians, economists, and other researchers must rely on observational data for their analysis of causal effects. In the absence of a randomzied experiment, inference can become problematic, and more advanced statistical techniques are required to tease out causality from correlation. This package implements leading analysis methods for inferring causality from observational data, including methods for assessing of covariate balance, estimating propensity scores, and computing average treatment effects and heterogeneous treatment effects. The vignette provides explainations of the methods available in `causality` and demonstrates how to apply them in practice.
+
+## The Rubin Causal Model
+
+We will examine causality through the lens of the Rubin causal model, an approach to the statistical analysis of cause and effect that is based on the framework of potential outcomes (Neyman, 1923; Rubin, 1974). 
+The fundamental notion in this model is that causality is tied to an action (or treatment or intervention) applied to a unit. The notion of potential outcomes is most easily understood from a motivating example. Consider $N$ units indexed by $i$, taking on values $1, ..., N$. There is a treatment $W$, which, for each unit $i$, is either absent, indicated by $W_i = 0$ or present, indicated by $W_i = 1$. For instance, this treatment could be a job training program that assists unemployed people in finding a job. For unit $i$, there exists two potential outcome, $Y_i(0)$ if $W_i=0$ and $Y_i(1)$ if $W_i=1$. If we can observe both potential outcomes, then the causal effect of the treatment is simply $Y_i(1) - Y_i(0)$.
+
+However, the fundamental problem of causal inference is that we can only observe one of the potential outcomes, denoted $Y_i^{\text{obs}}$, for each unit. 
+$$
+Y_i^{\text{obs}} = Y_i(W_i) = \begin{cases} 
+      Y_i(1) & W_i = 0 \\
+      Y_i(0) & W_i = 1 \\
+   \end{cases}
+$$
+The other potential outcome, $Y_i(1 - W_i)$ is the counterfactual and cannot be observed. 
+
+Consider again the job-training program example. In order to infer the causal effect of the pogram on a person's future earnings, we need to also know the *assignment mechanism*, how each unit came to receive the treatment level they actually received (the one potential outcome that is realized). If the assignment mechanism is random in that unemployed people are randomly assigned to receive and not receive aid from the pogram, then we can simply take a difference in mean future earnings to obtain the average treatment effect. However, suppose that the assignment is not random. In this situation, it is possible that the people who opt to join the program tend to be more highly educated, well-informed people. From this example, we can see that we cannot simply compare the observed potential outcomes for the tretment and control groups. 
+
+
+In order to obtain causal estimates of the treatment effect in situations with a non-random assignment mechanism, we can rely on additional information about each unit (covariates) in order to infer causality. In our example, this can include previous earnings, education levels, socioeconomic status, age, etc. These are considered pre-treatment variables, in that they are known *a priori* to be unaffected by the treatment assignment. We will denote this vector of covariates as $X_i$. If $X_i$ contains enough relevent information about each unit, we can obtain causal estimates for the effect of a treatment holding $X_i$ fixed. Further, in the presence of non-random assignment, these covariates can be used to correct for the assignment mechanism using various methods available in `causality`, including propensity score weighting and matching of control units similar to treated units. 
+
+### Assumptions 
+
+In order to make valid inference in the situation of non-random assignment, we need to rely on the assumption of unconfoundedness (Rosenbaum & Rubin, 1983):
+$$
+Y_i(0), Y_i(1) \perp W_i | X_i
+$$
+This means that the treatment is randomly assigned within each subpopulation indexed by $X_i = x$. Put another way, we need to capture enough relevant covariates in order for the treatment assignment to be free from dependence on the potential outcomes, conditional on the covariates. 
+
+Additionally, we need to rely on the overlap assumption, that is, that the probability of receiving the treatment is strictly between zero and one for all units:
+$$
+0 < P(W_i = 1 | X_i = x) < 1
+$$
+This assumption ensures that there is no subgroup for which $X = x$ in which all units are in the treatment or control group.  
+
+
+### Causal Estimands
+
+In `causality` we provide methods for estimating three types of causal effects. The first, and most commonly estimated causal effect, is the *average treatment effect*:
+$$
+\tau = E[Y_i(1) - Y_i(0)]
+$$
+
+The *average treatment effect on the treated* is also particularly useful in the case that there is an imbalance in the data where observations are more likely to be treated:
+$$
+\tau_T = E[Y_i(1) - Y_i(0) | W_i = 1]
+$$
+
+Additionally, it is often useful to estimate treatment effects hetereogeneously, that is, for different sub-groups of the sample. For instance, researchers may want to determine how effect of a drug differs for people of different ages or ethnicities. Here the goal is to estimate the *conditional average treatment effect*:
+$$
+\tau(x) = E[Y_i(1) - Y_i(0) | X_i = x]
+$$
+
+Likewise, we can estimate the *conditional average treatment effect on the treated*:
+$$
+\tau(x)_T = E[Y_i(1) - Y_i(0) | X_i = x, W_i = 1]
+$$
+
+Note that in a true randomized control trial, the average treatment effect is equivalent to the average treatment effect on the treated because $E[Y_i | W_i = 1] = E[Y_i(1) | W_i = 1] = E[Y_i(1)]$ and $E[Y_i | W_i = 0] = E[Y_i(0)]$. The same relationship holds with their heterogeneous counterparts (i.e. the conditional average treatment effect is equivalent to the conditional average treatment effect on the treated), assuming $W_i \perp (Y_i(1), Y_i(0))$, conditional on $X_i$.
+
+`causality` provides numerous strategies to estimate these causal effects, including matching estimators, estimators that use the popensity score, and model-based imputation. We descibe these methods in more detail and implement them below.
+
+## Data
+
+We use data from Lalonde's economic examination of training programs in which he estimates the effect of an employment program designed to help disadvantaged workers enter the labor market (Lalonde, 1986). The data comes from the National Supported Work Demonstration (NSW), a temporary employment program that aimed to help unskilled workers find jobs. At the time of the study, the NSW program was operating in ten cities across the country, admitting women in families under Aid to Families with Dependent Children (AFDC), ex-drug addicts, ex-criminal offenders, and high school dropouts. Individuals were randomly assigned to a treatment or control group where the treated were guaranteed jobs for 9-18 months (depending on the target group and site). The treatment group was divided into sub-groups of three to five individuals who typically worked together and met with an NSW representative to discuss work performance and issues. There is within-site and between-site variation (e.g. male and female participants usually had different types of work and the different sites had different base wages). Earnings and demographic data was collected for both the treatment and control groups, both during and at nine-month intervals after the conclusion of the program. Although there was a high attrition rate, it did not affect the experimental design. Lalonde provides experimental and non-experimental examinations of the data. For our purposes, we use the data in a non-experimental context.
+
+## Assessing Balance in Covariates
+
+Creating balanced covariates is important in order to establish causality from observational data with re-weighting or via matching methods. We implement several well-known methods for assessing balance in covariates to ensure that the overlap assumption is met.
+
+*Single Covariate Assessment*
+
+Single covariate assessment simply compares the distributions of treatment and control groups for a single variable, specified by the user. These are univariate distributions, so we fit a simple density curve and compare the control and treatment groups graphically.
+
+```{r}
+#Import data
+data(lalonde)
+
+#Continuous variable
+univariate_balance_plot(lalonde, "age", "treat")
+
+#Factor
+lalonde$hisp <- factor(lalonde$hisp)
+univariate_balance_plot(lalonde, "hisp", "treat")
+```
+
+*Mahalanobis Distance*
+
+In the case that the user wishes to analyze multivariate distributions, we allow specification of multiple covariates. We use Mahalanobis distance, which represents the distance between a point and a distribution, and is calculated as follows:
+
+$$
+d = \sqrt{\left|(\bar{\mathbf{X}}_t - \bar{\mathbf{X}}_c)^{\intercal}\left(\frac{\mathbf{\Sigma}_t + \mathbf{\Sigma}_c}{2}\right)^{-1}(\bar{\mathbf{X}}_t - \bar{\mathbf{X}}_c)\right|}
+$$
+
+Note that $\bar{\mathbf{X}}_t$ and $\bar{\mathbf{X}}_c$ are column-wise means of covariates in the treatment and control groups, respectively, and $\mathbf{\Sigma}_t$ and $\mathbf{\Sigma}_c$ are pairwise-complete covariance matricies of the treatment and control groups, repectively. This metric is used if the propensity scores are not provided by the user.
+
+```{r}
+#Import data
+data(lalonde)
+
+#Get covariates of interest
+vars <- names(lalonde)
+covariates <- vars[!vars %in% c("re78", "treat")]
+
+#Assess balance
+assess_covariate_balance(lalonde, x = covariates, w = "treat")
+```
+
+*Normalized Linearized Propensity Difference*
+
+In the case that the user has previously calculated propensity scores, we offer the option of using a normalized linearized propensity difference (NLPD) metric. The NLPD is calculated as follows:
+
+$$
+d = \frac{\frac{1}{n_t}\sum_{i=1}^{n_t}\log\left(\frac{p_{it}}{1 - p_{it}}\right) - \frac{1}{n_c}\sum_{i=1}^{n_c}\log\left(\frac{p_{ic}}{1 - p_{ic}}\right)}{\sqrt{\frac{\text{Var}\left(\frac{\mathbf{p}_t}{1 - \mathbf{p}_t}\right) + \text{Var}\left(\frac{\mathbf{p}_c}{1 - \mathbf{p}_c}\right)}{2}}}
+$$
+
+Note that $\mathbf{p}_t$ and $\mathbf{p}_c$ are propensity score vectors found for the treatment and control groups, respectively, and $n_t$ and $n_c$ are their respective sample sizes. Recall that this metric is only available if the propensity scores are provided by the user.
+
+```{r}
+#Calculate propensity scores
+p <- propensity_score(lalonde, y = "re78", w = "treat", plot = F)
+
+#Assess balance
+assess_covariate_balance(lalonde, x = covariates, w = "treat", p = p, method = "NLPD")
+```
+
+*Graphical Representation*
+
+It is often useful to assess balance graphically. We use the NLPD and Mahalanobis Distance estimates from above and graph balance by covariate. The user is allowed to input color schemes and thresholds for how well the variables should be balanced. This works for matched and unmatched propensity scores.
+
+```{r}
+#Balance plot without matching
+balance_plot(lalonde, x = covariates, w = "treat")
+
+#Matched indicies
+matched_indices <- propensity_match(lalonde, w = "treat", p = p, max_distance = .00001)
+
+#Balance plot with matching
+balance_plot(lalonde, x = covariates, w = "treat", matched_indices = matched_indices)
+```
+
+## Propensity Scores
+
+#### Estimation
+
+Propensity scores are a measure of the likelihood of treatment based on a set of covariates. Re-weighting observations with a function of their propensity scores or using propensity scores to select a balanced subsample are key strategies for inferring causality from observational data. We implement several different methods for calculating propensity scores.
+
+*Logistic Regression*
+
+Considering that a treatment in our framework is a binary variable, consider the classic logistic regression. The first method we implement is a vanilla logistic regression, estimated as:
+
+$$
+\log\left(\frac{e_i}{1 - e_i}\right) = \beta^{\intercal}\mathbf{X_i}
+$$
+Note that $\mathbf{X}$ is a matrix of covariates and $e_i$ is the propensity score. 
+
+```{r}
+#Estimate propensity scores
+p <- propensity_score(lalonde, y = "re78", w = "treat", model = "logistic", plot = F)
+head(p)
+```
+
+*LASSO-penalized Logistic Regresion*
+
+Given that many variables are necessary to approach unconfoundedness, a problem of multicollinearity in high dimensional datasets may arise. Therefore, we offer the option to use regularization to mitigate this risk. The second method is a LASSO-penalized logistic regression, specified as:
+
+$$
+\log\left(\frac{e_i}{1 - e_i}\right) = \beta^{\intercal}\mathbf{X_i} + \lambda\sum_{j=1}^{k}|\beta_j|
+$$
+where $k$ indexes covariates in the vector $\mathbf{X_i}$. This forces the coefficients on covariates that are not important in predicting probability of treatment to zero, leaving the rest as the truly important predictors. The tuning parameter $\lambda$ is selected via cross-validation. 
+
+```{r}
+#Estimate propensity scores
+p <- propensity_score(lalonde, y = "re78", w = "treat", model = "lasso", plot = F)
+head(p)
+```
+
+*Causal Forests*
+
+In the case when there is highly non-linear separation in the data, classical regression methods may not be the best propensity score estimators. The final option we allow for to estimate propensity scores is a causal forest, which is closely related to random forests. Random forests are groups of uncorrelated and truncated decision trees which are "grown" from random subsets of the data. This leads to a lack of correlation between trees, allowing an unbiased result in the average of the decision trees within the forest. The causal forest, built in the package `grf`, estimates the probability of treatment with a random forest. We use this implementation to calculate propensity scores below.
+
+```{r}
+#Estimate propensity scores
+p <- propensity_score(lalonde, y = "re78", w = "treat", model = "causal forest", plot = F)
+head(p)
+```
+
+#### Checking Assumptions
+
+There are several assumptions that must be met in order for propensity scores to be useful in causal inference. First, the overlap assumption must be met. That is, there must be enough observations that have similar propensity scores in both the treatment and control groups (not all observations can be predicted as $p = 1$ or $p = 0$ for treatment; there must be a lot in the middle). We check this with a histogram of propensity scores. If the histogram is well spread, then the overlap assumption is met. Second, the scores must be well calibrated. This means that they must follow roughly the distribution of the treatment. We use a Q-Q plot in order to check this assumption. If the curve follows a 45-degree line, then this assumption is met. 
+
+In the cases that either of these assumptions are not met, we allow trimming of observations at the ends of estimated propensity scores. More specifically, if the data has many observations that are predicted to be in the treatment group, it might be wise for the user to trim some of these in order to maintain a balanced dataset. Propensity score weighting, especially with logistic regressions, is sensitive to model misspecification and outlier weights can high influence results. It has been shown that trimming the data according to logistic-estimated weights can improve accuracy and precision of parameter estimates (Lee, Lessler, and Stuart, 2011). The user is able to specify a lower- and upper-bound on the propensity scores.
+
+```{r, fig.height = 4, fig.width = 7}
+#Calculate propensity scores, load treatment
+p <- propensity_score(lalonde, y = "re78", w = "treat", model = "logistic", plot = FALSE)
+w <- lalonde$treat
+
+#Check assumptions
+check_propensity(p = p, w = w)
+```
+
+#### Matching
+
+When the oiginal sample exhibits a substancial amount of imbalance, it may be beneficial to constuct a subsample with improved balance. One way to do this is by peforming subsample selection using matching of control units to similar treatment units. The `causality` package povides three matching methods: popensity score matching, nearest-neighbor matching, and exact matching. 
+
+*Propensity Score Matching*
+
+We allow the user to specify the methodology with which they wish to match observations. The default is a simple distance between propensity scores. There is also a linear distance in which the difference in log-odds ratios is transformed into a difference in probabilities. We also allow for replacement or one-to-one matching with a threshold on the maximum distance between control and treatment observations. 
+
+```{r}
+#Calculate propensity scores
+p <- propensity_score(lalonde, y = "re78", w = "treat", plot = F)
+
+#Match propensity scores
+head(propensity_match(lalonde, w = "treat", p = p, max_distance = .2))
+```
+
+*General Matching*
+
+Matching does not necessitate the calculation of propensity scores. We also allow the user to match more generally with the various distributions of covariates. The user is given options to specify exact or Mahalanobis distance between distributions. Exact matching refers to column-wise differences in means whereas Mahalanobis distance is calculated with the formula specified earlier to measure the distance between a point and a distribution.
+
+```{r}
+#General matching (FIX diffs2 bug)
+head(general_match(lalonde, w = "treat", max_distance = 10, type = "mahalanobis"))
+```
+
+## Average Treatment Effects (ATEs)
+
+*Naive Estimator*
+
+We begin with the most basic estimator of an average treatment effect by computes a simple difference in means between the treatment group and the control group, estimated as:
+
+$$\tau = E[Y_i | W = 1] - E[Y_i | W = 0]$$
+
+```{r}
+#Estimate ATE
+naive_ate(data = lalonde, y = "re78", w = "treat")
+```
+
+*Inverse Propensity Weighting (IPW)*
+
+In order to derive causality from observational data, some re-weighting is sometimes necessary. One way to re-weight observations is through IPW. We compute an estimate of the ATE $\tau$ using propensity score weighting: 
+
+$$\tau = E \left[ \frac{Y_i W_i}{e(X_i)} - \frac{Y_i (1 - W_i)}{1 - e(X_i)} \right]$$
+
+where $e(X_i) = P(W_i = 1 | X_i = x)$ is the propensity score. 
+
+```{r}
+#Calculate propensity scores and IPW ATE
+p <- propensity_score(data = lalonde, y = "re78", w = "treat", model = "logistic", plot = F)
+ipw_ate(data = lalonde, y = "re78", w = "treat", p = p)
+```
+
+*IPW and OLS*
+
+Next, we compute an estimate of the ATE $\tau$ via weighted OLS regression using propensity score weighting. The weights are given by:
+
+$$w_i = \frac{W_i}{e(X_i)} - \frac{1 - W_i}{1 - e(X_i)}$$
+
+where $e(X_i) = P(W_i = 1 | X_i = x)$ is the propensity score.
+
+```{r}
+#Calculate propensity scores and IPW OLS
+p <- propensity_score(lalonde, y = "re78", w = "treat", model = "logistic", plot = F)
+prop_weighted_ols_ate(data = lalonde, y = "re78", w = "treat", p = p)
+```
+
+*Augmented Inverse Propensity Score Weighting (AIPW)*
+
+Another method with propensity weighting is the AIPW estimator. We estimate the ATE $\tau$ using the doubly robust method described in Scharfstein, Robins and Rotznitzky (1998) that combines both regression and propensity score weighting. 
+
+$$\tau = E \left[  W_i \frac{Y_i-\tau(1,X_i)}{e(X_i)} + (1-W_i) \frac{Y_i-\tau(0,X_i)}{1-e(X_i)} + \tau(1,X_i) - \tau(0,X_i)\right]$$
+
+where $e(X_i) = P(W_i = 1 | X_i = x)$ is the propensity score and $\tau(1, X_i)$ and $\tau(0, X_i)$ are estimated in the first stage via OLS regression.
+
+```{r}
+#Calculate propensity scores and AIPW ATE
+p <- propensity_score(lalonde, y = "re78", w = "treat", model = "logistic", plot = F)
+aipw_ate(data = lalonde, y = "re78", w = "treat", p = p)
+```
+
+*Stratified Propensity Scores*
+
+In some instances, it is beneficial to stratify the data by its calculated propensity score, estimate the ATE in each strata, and average across all strata. We implement methodology that allows the user to input the desired number of strata (or minimum number of observations in a given strata) and return an estimate of the average treatment effect (estimated by the user's choice of estimator from above).
+
+```{r}
+#Calculate propensity scores and ATE
+p <- propensity_score(lalonde, y = "re78", w = "treat", model = "logistic", plot = F)
+propensity_strat_ate(data = lalonde, 
+                     y = "re78", 
+                     w = "treat",
+                     p = p, 
+                     n_strata = 4, 
+                     min_obs = 1)
+```
+
+*Double Selection*
+
+Estimates the average treatment effect $\tau$ using the methodology developed in Belloni, Chernozhukov, and Hansen (2014), which they term the "post-double-selection" method. The general procedure performed here is as follows: 
+
+1. Predict the treatment $W_i$ using the covariates $X_i$ using lasso regression (where $\lambda$ is tuned using cross-validation). Select the covariates that have non-zero coefficients in the lasso model. 
+
+2. Predict the outcome $Y_i$ using the covariates $X_i$ using lasso regression (where $\lambda$ is tuned using cross-validation). Select the covariates that have non-zero coefficients in the lasso model. 
+
+3. Estimate the treatment effect $\tau$ by the linear regression of $Y_i$ on the treatment $W_i$ and the union of the set of variables selected in the two covariate selection steps.
+ 
+```{r}
+#Estimate ATE
+double_selection_ate(data = lalonde, y = "re78", w = "treat")
+```
+
+## Average Treatment Effects on the Treated (ATTs)
+
+*Unweighted Random Forests*
+
+Similar to the average treatment effects, we begin with a naive estimator of the average treatment effect on the treated. We fit a causal forest to estimate the ATT by only aggregating over the treated observations.
+
+```{r}
+#Estimate ATT
+rf_att(data = lalonde, y = "re78", w = "treat", num.trees = 100, mtry = 3)
+```
+
+*AIPW Random Forests*
+
+Now, we use the doubly robust method of augmented inverse propensity score weighting with a causal forest. Again, we only aggregate over the treated observations in order to estimate the ATT rather than the ATE.
+
+```{r}
+#Calculate propensity scores, estimate ATT
+p <- propensity_score(lalonde, y = "re78", w = "treat", model = "logistic", plot = F)
+aipw_rf_att(data = lalonde, y = "re78", w = "treat", p = p, num.trees = 100, mtry = 3)
+```
+
+## Heterogeneous Treatment Effects
+
+`cauality` provides three meta-learner methods to estimate conditional average treatment effects. These meta-learners build on base algorithms (here we use regression forests) to estimate the CATE, a function that the base algorithms are not designed to estimate directly.
+
+*S-Learner*
+
+One of the most basic meta-learners is the S-learner. We implement the S-learner algorithm described in Künzel et al. (2019) for estimating conditional average treatment effects (CATE). In the S-learner algorithm, the treatment $W$ is included as a feature similar to all of the other covariates without the indicator being given any special role. The combined response function 
+
+$$\mu(x, w) = E \left[ Y^{\text{obs}} | X = x, W = w \right]$$
+
+can then be estimated using any base learner (supervised machine learning or regression algorithm) on the entire dataset. Here we implement the S-learner with the option for a linear regression or a regression forest (see Athey, Tibshirani, and Wager (2016)) as the base learner. The CATE estimator is then given by:
+
+$$\hat{\tau}(x) = \hat{\mu}(x, 1) - \hat{\mu}(x, 0)$$
+
+```{r, fig.height = 4, fig.width = 7}
+#Estimate HTE
+head(s_learner(data = lalonde, y = "re78", w = "treat", num.trees = 100, mtry = 3)$CATE)
+```
+
+*T-Learner*
+
+Next, we implement the T-learner algorithm described in Künzel et al. (2019) for estimating conditional average treatment effects (CATE). In the T-learner algorithm, the control response function is estimated using all units in the control group as:
+
+$$\mu_0 = E [ Y(0) | X = x]$$
+
+Meanwhile, the treatment response function is estimated using all units in the treatment group:
+
+$$\mu_1 = E [ Y(1) | X = x]$$
+
+Both $\mu_0$ and $\mu_1$ are estimated using any base learner (supervised machine learning or regression algorithm). Here we implement the T-learner with the option for linear regression or regression forest (see Athey, Tibshirani, and Wager (2016)) as the base learner. The CATE is then estimated in the second stage as:
+
+$$\hat{\tau}(x) =  \hat{\mu}(x, 1) - \hat{\mu}(x, 0)$$
+
+```{r, fig.height = 4, fig.width = 7}
+#Estimate HTE
+head(t_learner(data = lalonde, y = "re78", w = "treat", num.trees = 100, mtry = 3)$CATE)
+```
+
+*X-Learner*
+
+Finally, we implement the X-learner algorithm proposed in Künzel et al. (2019) for estimating conditional average treatment effects (CATE). In the first stage of the X-learner, the control response function is estimated using all units in the control group as:
+
+$$\mu_0 = E [ Y(0) | X = x]$$
+
+Meanwhile, the treatment response function is estimated using all units in the treatment group:
+
+$$\mu_1 = E [ Y(1) | X = x]$$
+
+Both $\mu_0$ and $\mu_1$ are estimated using any base learner (supervised machine learning or regression algorithm). Here we implement the X-learner with linear regression or regression forest (see Athey, Tibshirani, and Wager (2016)) as the base learner. 
+
+In the second stage, the treatment effect for each observation is then imputed by estimating the counterfactual outcome for each observation using the first-stage base learner models:
+
+$$\tilde{D}^1_i := Y^1_i - \hat{\mu}_0(X^1_i)$$
+
+and 
+
+$$\tilde{D}^0_i := Y^0_i - \hat{\mu}_0(X^0_i)$$
+
+where $\tilde{D}^1_i$ and $\tilde{D}^1_i$ are the imputed treatment effects (two for each observation). The CATE is then estimated in two ways: 
+
+$$\hat{\tau}_1 = E[\tilde{D}^1 | X = x]$$
+
+and 
+
+$$\hat{\tau}_0 = E[\tilde{D}^0 | X = x]$$
+
+Currently, we include the option to estimate $\hat{\tau}_1$ and $\hat{\tau}_0$ with linear regression or regression forests.
+
+In the third stage, estimate the CATE by a weighted average of the two estimates from the second stage:
+
+$$\hat{\tau} = g(x) \hat{\tau}_0(x) + (1 - g(x)) \hat{\tau}_1(x)$$
+
+Here, we choose propensity scores to be the weighting function $g(x)$.
+
+Since the X-learner can use information from the control group to derive better estimators for the treatment group and vice versa, the X-learner is particularly useful when the number of units in one of the groups group is much larger than in the other group (see Künzel et al. (2019) for more).
+
+```{r, fig.height = 4, fig.width = 7}
+#Estimate HTE
+head(x_learner(data = lalonde, y = "re78", w = "treat", num.trees = 100, mtry = 3)$CATE)
+```
+
+## Conclusion
+
+Randomization, while ideal, is often infeasible or unethical, thus forcing the reliance on observational data for analysis of causal effects. Inference becomes more difficult as it necessitates more advanced and nuanced statistical techniques. We seek to make such difficult analysis painless for the researcher by implementing many novel methods in causal inference from observational data. `causality` allows assessment of covariate balance, computation of propensity scores, and estimation of average treatment effects and heterogenous treatment effects from a wide suite of methodology.
+
+## Further Reading 
+
+Adabie, Alberto and Guido Imbens. 2016. "[Matching on the Estimated Propensity Score](https://doi.org/10.3982/ECTA11293)." *Econometrica*. Vol. 84(2), March, pgs. 781-807.  
+
+Athey, Susan, Julie Tibshirani, and Stefan Wager. 2016. "[Generalized Random Forests](https://arxiv.org/abs/1610.01271)." Working paper; Forthcoming in the *Annals of Statistics*.
+
+Belloni, Alexandre, Victor Chernozhukov, and Christian Hansen. 2014. "[High-Dimensional Methods  and Inference on Structural and Treatment Effects](https://www.aeaweb.org/articles?id=10.1257/jep.28.2.29)." *Journal of Economic Perspective*. Vol. 28, Num. 2, Spring, pgs. 29–50. 
+
+Imbens Guido. 2004. "[Nonparametric Estimation of Average Treatment Effects under Exogeneity: A Review](http://www.stat.columbia.edu/~gelman/stuff_for_blog/imbens.pdf)." *Review of Economics and Statistics*. Vol. 86(1), pgs. 4-29.
+
+Imbens, Guido, and Donald Rubin. *Causal Inference for Statistics, Social, and Biomedical Sciences: An Introduction*. Cambridge University Press, 2015. 
+
+Künzel, Sören R., Jasjeet S. Sekhon, Peter J. Bickel, and Bin Yu. 2019. "[Metalearners for estimating heterogeneous treatment effects using machine learning](https://doi.org/10.1073/pnas.1804597116)." *Proceedings of the National Academy of Sciences of the United States of America.* Mar. 116(10): 4156–4165.
+
+Lee, Brian, Lessler, Justin, and Stuart, Elizabeth. 2011. "[Weight Trimming and Propensity Score Weighting](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3069059/#!po=1.47059)." *Public Library of Science.* 6(3): e18174.
+
+Rosenbaum, Paul, and Donald Rubin. 1983. "[The central role of the propensity score in observational studies for causal effects](https://doi.org/10.1093/biomet/70.1.41)." *Biometrika*. Vol. 70(1), April, pgs. 41–55.
+
+Rosenbaum, Paul, and Donald Rubin. 1984. "[Reducing Bias in Observational Studies Using Subclassification on the Propensity Score](https://amstat.tandfonline.com/doi/abs/10.1080/01621459.1984.10478078#.XnLe5JNKjzI)." *Journal of the American Statistical Association*. Vol. 79(387), Feb. pgs 516-524.
+
+Wager, Stefan and Susan Athey. 2018. "[Estimation and Inference of Heterogeneous Treatment Effects using Random Forests](https://arxiv.org/abs/1510.04342)." *Journal of the American Statistical Association*. Vol. 113(523), Jun. pgs. 1228-1242.
